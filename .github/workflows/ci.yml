@@ -48,6 +48,9 @@ jobs:
       - name: Run tests
         run: python -m pytest tests -q --cov=. --cov-report=term-missing --cov-fail-under=55
 
+      - name: Verify README assets regenerate
+        run: FORCE_DEMO_DATA=1 python scripts/make_assets.py --skip-gif
+
       - name: Smoke test the CLI
         run: python scripts/daily_report.py --tickers AAPL --days 90 --no-llm --no-pdf
 

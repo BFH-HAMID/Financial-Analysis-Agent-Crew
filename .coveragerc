@@ -1,0 +1,20 @@
+[run]
+branch = False
+source = .
+# Tests are not "coverage"; the asset generator is a developer tool that draws
+# PNG/GIF artwork and cannot be meaningfully unit-tested, so it is measured by
+# the CI step that simply runs it end to end.
+omit =
+    tests/*
+    conftest.py
+    scripts/make_assets.py
+    .venv/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    if __name__ == .__main__.:
+    raise NotImplementedError
+show_missing = True
+skip_covered = False

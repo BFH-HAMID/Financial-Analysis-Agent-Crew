@@ -1,5 +1,5 @@
 # Financial Analysis Agent Crew — developer shortcuts
-.PHONY: help install dev test lint format run docker-build docker-run clean
+.PHONY: help install dev test lint format run assets demo docker-build docker-run clean
 
 PY ?= python3
 VENV ?= .venv
@@ -20,6 +20,9 @@ run:  ## Start the Streamlit app on http://localhost:8501
 
 test:  ## Run the test-suite (offline, no API key required)
 	$(VENV)/bin/python -m pytest tests -q
+
+assets:  ## Regenerate the README images in docs/assets (offline, ~15s)
+	FORCE_DEMO_DATA=1 $(VENV)/bin/python scripts/make_assets.py
 
 lint:  ## Lint with ruff
 	$(VENV)/bin/ruff check .
