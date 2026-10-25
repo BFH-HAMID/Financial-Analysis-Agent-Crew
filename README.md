@@ -15,17 +15,18 @@ Built with **[agno](https://github.com/agno-agi/agno)**, **Gemini**, **Streamlit
 
 1. [Features](#features)
 2. [How it works](#how-it-works)
-3. [Project structure](#project-structure)
-4. [Quick start](#quick-start)
-5. [Configuration](#configuration)
-6. [Using the app](#using-the-app)
-7. [Command line & automation](#command-line--automation)
-8. [Docker](#docker)
-9. [Deployment](#deployment)
-10. [Testing & code quality](#testing--code-quality)
-11. [Design decisions & error handling](#design-decisions--error-handling)
-12. [Troubleshooting](#troubleshooting)
-13. [Disclaimer](#disclaimer)
+3. [Agent prompts & report contract](#agent-prompts)
+4. [Project structure](#project-structure)
+5. [Quick start](#quick-start)
+6. [Configuration](#configuration)
+7. [Using the app](#using-the-app)
+8. [Command line & automation](#command-line--automation)
+9. [Docker](#docker)
+10. [Deployment](#deployment)
+11. [Testing & code quality](#testing--code-quality)
+12. [Design decisions & error handling](#design-decisions--error-handling)
+13. [Troubleshooting](#troubleshooting)
+14. [Disclaimer](#disclaimer)
 
 ---
 
@@ -41,7 +42,8 @@ Built with **[agno](https://github.com/agno-agi/agno)**, **Gemini**, **Streamlit
 | **News** | DuckDuckGo news → DuckDuckGo web → NewsAPI (optional key) with de-duplication and a date window |
 | **Sentiment** | VADER + a finance lexicon (`guidance cut`, `downgrade`, `record high`, …) with per-headline scores and an aggregate label |
 | **Charts** | Plotly price/SMA, volume, RSI and KPI bar charts; rendered to PNG for the PDF (kaleido when available, matplotlib otherwise) |
-| **PDF** | Cover with recommendation badge and confidence bar, executive summary, company snapshot, news table, sentiment box, 23-row KPI table, charts, risk assessment, recommendation, confidence, methodology, disclaimer, optional conversation-log appendix |
+| **Report** | Seven-section contract: Executive Summary, Market News Summary, KPI Table and Charts, Sentiment Overview, Analysis and Outlook, Recommendation with a 0-100 confidence score, and the "not financial advice" disclaimer |
+| **PDF** | Cover with company facts, recommendation badge and confidence bar, then the same seven sections plus a 23-row KPI table, four embedded charts, methodology note, disclaimer and an optional conversation-log appendix |
 | **Robustness** | Typed errors, graceful degradation at every step, retries, rotating logs and an **offline deterministic crew** when no API key is present |
 | **Ops** | Dockerfile + compose, Makefile, GitHub Actions (CI + scheduled reports), Telegram/email delivery hooks |
 
@@ -104,6 +106,69 @@ with cost. Anything still missing is filled from the deterministic report, in an
 labelled appendix.
 
 ---
+
+### Agent prompts
+
+The four prompts in `prompts/prompts.py` are the specification of the product — the tests in
+`tests/test_prompts.py` fail if a required section, metric or rule disappears from them.
+
+**Orchestrator** — defines the crew, the hand-off order and the loop budget:
+
+> Workflow: 1) Market Researcher gathers news and sentiment. 2) Data Analyst computes KPIs and
+> charts from the researcher's context. 3) Report Writer produces the final report using both
+> outputs.
+> Rules: run the agents in this order and pass previous outputs as context; if the Writer finds
+> missing or inconsistent data, send it back to the relevant agent (max 2 revision rounds);
+> verify each output is non-empty and consistent before moving on; log every hand-off briefly
+> for the Agent Conversation Log.
+
+**Market Researcher** — news, per-item classification, aggregate score and risks/catalysts:
+
+> You are a Market Researcher specializing in equities. Given a stock and a date range: search
+> for the latest financial news, earnings updates, analyst opinions and relevant social
+> media/tweets; classify each item as Positive / Neutral / Negative with a short reason; output
+> 5-10 key news items with source and date, an overall sentiment score from -1 to +1, and the
+> key risks and catalysts. Never invent news. If sources are insufficient, say so explicitly.
+
+**Data Analyst** — the requested metric set, charts and a KPI table:
+
+> You are a Quantitative Data Analyst. Using the finance tools, for the given ticker and date
+> range: fetch price history and compute P/E, EPS, market cap, ROI, volatility (standard
+> deviation of daily returns), 50/200-day moving averages, RSI and max drawdown; generate
+> charts for price with moving averages, volume and a KPI comparison; summarise the numbers in
+> plain language (trend, strength, risk). Return a markdown table of KPIs plus chart file paths.
+> Use only tool-provided data; never guess numbers.
+
+**Report Writer** — the report contract:
+
+> Combine the Researcher's news/sentiment and the Analyst's KPIs/charts into a report with
+> sections: 1. Executive Summary, 2. Market News Summary, 3. KPI Table and Charts,
+> 4. Sentiment Overview, 5. Analysis and Outlook, 6. Recommendation (Buy / Hold / Sell) with a
+> Confidence Score (0-100%), 7. Disclaimer: "This is not financial advice." If any data is
+> missing or contradictory, request clarification from the relevant agent instead of guessing.
+> Tone: professional and concise.
+
+Each agent prompt also carries a shared block of operating rules: ground every claim in tool
+output, mark synthetic data, use two decimals, stay neutral, and write structured Markdown.
+
+**The report contract** (`REPORT_SECTIONS`) is enforced end to end:
+
+| # | Section | Filled by |
+| --- | --- | --- |
+| 1 | Executive Summary | Writer (offline crew supplies a fallback) |
+| 2 | Market News Summary | Researcher output, rendered by the Writer |
+| 3 | KPI Table and Charts | Analyst output + embedded chart images |
+| 4 | Sentiment Overview | Sentiment tool scores |
+| 5 | Analysis and Outlook | Writer synthesis (incl. sentiment/price divergence call-outs) |
+| 6 | Recommendation | Bold label + `**Confidence:** NN/100 (label)` |
+| 7 | Disclaimer | Fixed text starting "This is not financial advice." |
+
+The PDF follows the same order; the cover carries the company facts (sector, industry,
+exchange, market cap, 52-week range, trading days) that do not have their own section.
+Draft QA checks the headings, the label, the numeric confidence score, that at least ten
+concrete figures are cited, that sentiment and price action are reconciled, and that synthetic
+data is disclosed — and anything still missing is appended from the deterministic report in a
+labelled appendix.
 
 ## Project structure
 
@@ -328,6 +393,8 @@ The suite covers:
 | `tests/test_orchestrator.py` | end-to-end offline run, required sections, revision QA, artefact writing |
 | `tests/test_llm_and_fallbacks.py` | model factory, live-crew failure fallback, draft gap-filling |
 | `tests/test_app.py` | real Streamlit app via `AppTest` (startup, validation, full click-through) |
+| `tests/test_prompts.py` | the prompt/report contract: headings, required metrics, disclaimer, task templates, deterministic-report compliance |
+| `tests/test_cli.py` | batch CLI, summary JSON, delivery hooks |
 | `tests/test_utils.py` | logging, conversation log, formatting, settings |
 
 Tests never call Gemini or Yahoo: external calls are replaced by fixtures and synthetic data.

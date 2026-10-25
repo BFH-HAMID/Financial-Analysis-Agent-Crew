@@ -110,7 +110,7 @@ class TestLiveCrewDegradation:
         assert result.recommendation == "BUY"
         # Missing sections are appended by the deterministic fallback.
         assert "Appendix" in result.report_markdown
-        assert "Confidence Score" in result.report_markdown
+        assert "Confidence" in result.report_markdown
         assert "Disclaimer" in result.report_markdown
         # Demo runs must disclose synthetic data even if the LLM forgot.
         assert "SYNTHETIC DEMO DATA" in result.report_markdown.upper()
@@ -173,6 +173,23 @@ class TestDraftValidation:
     def test_missing_structure_is_rejected(self):
         draft = "## Notes\n" + "Some prose without headings. " * 40
         assert validate_llm_draft(draft) is not None
+
+    def test_missing_disclaimer_sentence_is_backfilled(self, monkeypatch):
+        monkeypatch.setattr("agents.orchestrator.build_model", lambda *a, **k: object())
+        draft = (
+            "# AAPL — Financial Analysis Report\n\n"
+            "## Executive Summary\nRevenue grew 12.5% with 21.4x P/E and 3.1% yield.\n\n"
+            "## KPI Table and Charts\n| Metric | Value |\n| --- | --- |\n| P/E | 21.4 |\n"
+            "| ROI | 12.5% |\n| RSI | 58.2 |\n\n"
+            "## Recommendation\n**BUY** — momentum is positive.\n"
+            "**Confidence:** 61/100 (moderate)\n\n"
+            "## Disclaimer\nEducational use only.\n"
+        )
+        monkeypatch.setattr(
+            Orchestrator, "_run_live_crew", lambda self, **kwargs: ("r", "a", draft, 0)
+        )
+        result = Orchestrator(generate_pdf=False).run("AAPL", date(2024, 1, 1), date(2024, 5, 1))
+        assert "not financial advice" in result.report_markdown.lower()
 
     def test_unusable_live_output_falls_back_to_offline(self, monkeypatch):
         monkeypatch.setattr("agents.orchestrator.build_model", lambda *a, **k: object())

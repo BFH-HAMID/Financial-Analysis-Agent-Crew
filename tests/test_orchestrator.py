@@ -40,19 +40,37 @@ class TestAnalysisRun:
         assert set(result.chart_images) == {"price", "volume", "rsi", "kpi"}
 
     def test_report_contains_every_required_section(self, analysis_result):
+        """The report follows the Writer contract: seven canonical sections."""
         for key in (
             "executive_summary",
-            "company_snapshot",
-            "news_sentiment",
+            "news_summary",
             "kpi_table",
-            "charts",
-            "risk_assessment",
+            "sentiment",
+            "outlook",
             "recommendation",
-            "confidence",
-            "methodology",
             "disclaimer",
         ):
             assert has_section(analysis_result.report_markdown, key), f"missing section: {key}"
+
+    def test_report_headings_are_in_contract_order(self, analysis_result):
+        headings = [
+            line.lstrip("# ").strip()
+            for line in analysis_result.report_markdown.splitlines()
+            if line.startswith("## ")
+        ]
+        assert headings == [
+            "Executive Summary",
+            "Market News Summary",
+            "KPI Table and Charts",
+            "Sentiment Overview",
+            "Analysis and Outlook",
+            "Recommendation",
+            "Disclaimer",
+        ]
+
+    def test_confidence_line_lives_in_the_recommendation_section(self, analysis_result):
+        sections = split_sections(analysis_result.report_markdown)
+        assert "**Confidence:**" in sections["recommendation"]
 
     def test_report_discloses_synthetic_data(self, analysis_result):
         assert "SYNTHETIC DEMO DATA" in analysis_result.report_markdown.upper()
@@ -165,8 +183,14 @@ class TestOfflineCrew:
 
     def test_briefs_are_markdown(self, kpis, sentiment, news):
         research = research_brief(news, sentiment.to_dict(), "AAPL", "Apple Inc.")
-        assert research.startswith("## News Summary")
-        assert "## Sentiment" in research
+        assert research.startswith("## Key News Items")
+        for heading in ("## Sentiment", "## Key Risks", "## Catalysts"):
+            assert heading in research
+        # Every news item carries a Positive/Neutral/Negative classification.
+        assert research.count("**Positive**") + research.count("**Neutral**") + research.count(
+            "**Negative**"
+        ) >= len(news)
+        assert "score" in research
 
         analysis = analyst_brief(kpis, "AAPL", "Apple Inc.")
         assert "## KPI Highlights" in analysis
@@ -183,8 +207,18 @@ class TestOfflineCrew:
             start=start,
             end=end,
         )
-        for key in ("executive_summary", "kpi_table", "recommendation", "confidence", "disclaimer"):
+        for key in (
+            "executive_summary",
+            "news_summary",
+            "kpi_table",
+            "sentiment",
+            "outlook",
+            "recommendation",
+            "disclaimer",
+        ):
             assert has_section(report, key)
+        # The confidence score is embedded in the Recommendation section.
+        assert "**Confidence:**" in report
 
 
 class TestReportQa:
@@ -207,6 +241,7 @@ class TestReportQa:
         partial = "# AAPL\n\n## Executive Summary\nShort summary."
         merged = ensure_report_sections(partial, fallback, kpis)
         assert has_section(merged, "executive_summary")
+        assert has_section(merged, "kpi_table")
         assert has_section(merged, "recommendation")
         assert has_section(merged, "disclaimer")
         assert "Appendix" in merged

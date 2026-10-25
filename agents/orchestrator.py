@@ -36,6 +36,7 @@ from agents.offline_crew import (
 )
 from config.settings import get_settings
 from prompts.prompts import (
+    DISCLAIMER_TEXT,
     EXPECTED_OUTPUT,
     REQUIRED_SECTIONS,
     SECTION_ALIASES,
@@ -628,43 +629,41 @@ def has_section(markdown: str, key: str) -> bool:
 
 
 def ensure_report_sections(draft: str, fallback: str, kpis: dict[str, Any]) -> str:
-    """Guarantee the report contains every required section.
+    """Guarantee the report satisfies the section contract.
 
-    Sections missing from the LLM draft are copied from the deterministic
-    fallback report, so the PDF always has a summary, KPI table, recommendation,
-    confidence score and disclaimer.
+    Three gaps are repaired from the deterministic report, each in a clearly
+    labelled appendix so nothing looks like it came from the model:
+
+    1. required headings the draft never produced;
+    2. the "This is not financial advice." disclaimer sentence;
+    3. the calibrated ``**Confidence:** NN/100`` score.
+
+    Args:
+        draft: Markdown produced by the crew (may be empty).
+        fallback: Deterministic report used as the source of missing content.
+        kpis: Computed KPIs (used for the title and the demo-data disclosure).
+
+    Returns:
+        The repaired Markdown report.
     """
     if not draft or not draft.strip():
         return fallback
 
-    required = {
-        "Executive Summary": "executive_summary",
-        "KPI Table": "kpi_table",
-        "Recommendation": "recommendation",
-        "Confidence Score": "confidence",
-        "Disclaimer": "disclaimer",
-    }
-    missing = [
-        heading for heading in REQUIRED_SECTIONS if not has_section(draft, required[heading])
-    ]
+    missing = [(heading, key) for heading, key in REQUIRED_SECTIONS if not has_section(draft, key)]
 
     if not draft.lstrip().startswith("# "):
         draft = f"# {kpis.get('ticker', '')} — Financial Analysis Report\n\n{draft.lstrip()}"
     if kpis.get("is_demo") and "SYNTHETIC DEMO DATA" not in draft.upper():
+        head, _, tail = draft.partition("\n")
         draft = (
-            draft.split("\n", 1)[0]
-            + "\n\n> ⚠️ **SYNTHETIC DEMO DATA** — figures in this report are simulated and "
-            "must not be used for investment decisions.\n"
-            + (draft.split("\n", 1)[1] if "\n" in draft else "")
+            head + "\n\n> ⚠️ **SYNTHETIC DEMO DATA** — figures in this report are simulated and "
+            "must not be used for investment decisions.\n" + tail
         )
 
-    if not missing:
-        return draft
-
     fallback_sections = split_sections(fallback)
-    appendix = ["\n\n---\n", "## Appendix — system-generated sections\n"]
-    for heading in missing:
-        key = required[heading]
+    appendix: list[str] = []
+
+    for heading, key in missing:
         body = None
         for alias in SECTION_ALIASES.get(key, ()):
             if alias in fallback_sections:
@@ -673,7 +672,36 @@ def ensure_report_sections(draft: str, fallback: str, kpis: dict[str, Any]) -> s
         appendix.append(f"### {heading}\n{body or '_Section could not be generated._'}\n")
         logger.info("Appended missing report section: %s", heading)
 
-    return draft.rstrip() + "\n" + "\n".join(appendix)
+    # The disclaimer section may exist but omit the required sentence.
+    if "not financial advice" not in draft.lower():
+        appendix.append(f"### Disclaimer\n{DISCLAIMER_TEXT}\n")
+        logger.info("Appended the canonical not-financial-advice disclaimer")
+
+    # The contract puts the confidence score inside the Recommendation section,
+    # so a draft can carry every heading yet still omit the calibrated score.
+    if parse_recommendation(draft)["confidence"] is None:
+        excerpt = _confidence_excerpt(fallback)
+        if excerpt:
+            appendix.append(f"### Confidence Score\n{excerpt}\n")
+            logger.info("Appended the missing confidence score block")
+
+    if not appendix:
+        return draft
+
+    return (
+        draft.rstrip()
+        + "\n\n---\n\n## Appendix — system-generated sections\n\n"
+        + "\n".join(appendix)
+    )
+
+
+def _confidence_excerpt(fallback: str) -> str:
+    """Return the ``**Confidence:** …`` block from the deterministic report."""
+    recommendation = split_sections(fallback).get("recommendation", "")
+    marker = recommendation.find("**Confidence:**")
+    if marker == -1:
+        return ""
+    return recommendation[marker:].strip()
 
 
 #: Substrings that indicate the provider/library returned an error *as content*
@@ -715,7 +743,8 @@ def validate_llm_draft(draft: str) -> str | None:
         "executive_summary": has_section(text, "executive_summary"),
         "recommendation": has_section(text, "recommendation"),
         "kpi_table": has_section(text, "kpi_table"),
-        "confidence": has_section(text, "confidence"),
+        "confidence": has_section(text, "confidence")
+        or parse_recommendation(text)["confidence"] is not None,
     }
     if not (core["executive_summary"] and core["recommendation"]):
         return "draft is missing the executive summary or recommendation section"
@@ -748,15 +777,13 @@ def review_draft(
         )
 
     problems: list[str] = []
-    for heading, key in (
-        ("Executive Summary", "executive_summary"),
-        ("KPI Table", "kpi_table"),
-        ("Recommendation", "recommendation"),
-        ("Confidence Score", "confidence"),
-        ("Disclaimer", "disclaimer"),
-    ):
+    for heading, key in REQUIRED_SECTIONS:
         if not has_section(draft, key):
             problems.append(f"add the missing '{heading}' section")
+    # The Writer puts the confidence score inside the Recommendation section, so
+    # a dedicated heading is optional — but a numeric score is mandatory.
+    if not has_section(draft, "confidence") and parse_recommendation(draft)["confidence"] is None:
+        problems.append("add a confidence score in the form '**Confidence:** NN/100'")
 
     parsed = parse_recommendation(draft)
     if not parsed.get("recommendation"):
@@ -767,8 +794,11 @@ def review_draft(
         problems.append("add a numeric confidence score in the form '**Confidence:** NN/100'")
 
     numbers = len(re.findall(r"\d+\.\d+|\d{1,3}%", draft))
-    if numbers < 8:
-        problems.append("cite more concrete figures from the KPI analysis (at least 8 numbers)")
+    if numbers < 10:
+        problems.append("cite more concrete figures from the KPI analysis (at least 10 numbers)")
+
+    if "not financial advice" not in draft.lower():
+        problems.append('the disclaimer must state "This is not financial advice."')
 
     recommendation = parsed.get("recommendation")
     sentiment_score = safe_float(getattr(sentiment, "score", 0.0)) or 0.0

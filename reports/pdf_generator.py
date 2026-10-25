@@ -25,7 +25,7 @@ from typing import Any
 from config.settings import get_settings
 from prompts.prompts import DISCLAIMER_TEXT, SECTION_ALIASES
 from tools.finance_tools import build_kpi_table
-from utils.formatting import fmt_pct, sentiment_emoji
+from utils.formatting import fmt_compact, fmt_pct, sentiment_emoji
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -521,6 +521,47 @@ def _cover(result: Any, styles: dict[str, ParagraphStyle], chart_count: int) -> 
         )
         story.append(Spacer(1, 8))
 
+    # Company fact strip: profile data that no longer has its own section.
+    facts = [
+        ("Sector", str(kpis.get("sector") or "n/a")),
+        ("Industry", str(kpis.get("industry") or "n/a")),
+        ("Exchange", str(kpis.get("exchange") or "n/a")),
+        (
+            "Market cap",
+            fmt_compact(
+                kpis.get("market_cap"),
+                symbol="$" if (kpis.get("currency") or "USD") == "USD" else "",
+            ),
+        ),
+        (
+            "52-week range",
+            f"{_fmt_money(kpis.get('low_52w'), kpis.get('currency'))} - "
+            f"{_fmt_money(kpis.get('high_52w'), kpis.get('currency'))}",
+        ),
+        ("Trading days", str(kpis.get("trading_days", "n/a"))),
+    ]
+    fact_cells = [
+        [
+            Paragraph(f"<b>{label}</b>", styles["small"]),
+            Paragraph(inline_markup(value), styles["small"]),
+        ]
+        for label, value in facts
+    ]
+    fact_table = Table(fact_cells, colWidths=[26 * mm, 128 * mm])
+    fact_table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.3, GRID),
+                ("BACKGROUND", (0, 0), (0, -1), LIGHT),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    story.append(fact_table)
+    story.append(Spacer(1, 8))
+
     metrics = [
         ("Last price", _fmt_money(kpis.get("current_price"), kpis.get("currency"))),
         ("Period ROI", fmt_pct(kpis.get("period_roi_pct"))),
@@ -591,6 +632,7 @@ def _cover(result: Any, styles: dict[str, ParagraphStyle], chart_count: int) -> 
         warning
         for warning in (getattr(result, "warnings", []) or [])
         if not str(warning).startswith("Set ALLOW_DEMO_DATA")
+        and "SYNTHETIC DEMO DATA" not in str(warning).upper()
     ][:4]
     deduped: list[str] = []
     for warning in warning_lines:
@@ -687,11 +729,17 @@ CHART_CAPTIONS = {
 
 
 def _chart_flowables(result: Any, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    """Embed the rendered chart PNGs, keeping each image with its caption.
+
+    The section heading is bundled with the first image so it never lands alone
+    at the bottom of a page.
+    """
     images: dict[str, str] = getattr(result, "chart_images", {}) or {}
     if not images:
         return []
     max_width = PAGE_WIDTH - 2 * MARGIN
-    story: list[Any] = [Paragraph("Charts", styles["h1"])]
+    heading = Paragraph("Charts", styles["h1"])
+    story: list[Any] = []
     for key in ("price", "volume", "rsi", "kpi"):
         path = images.get(key)
         if not path or not Path(path).exists():
@@ -707,16 +755,15 @@ def _chart_flowables(result: Any, styles: dict[str, ParagraphStyle]) -> list[Any
                 width = width_px * (max_height / height_px)
             else:
                 width = max_width
-            story.append(
-                KeepTogether(
-                    [
-                        Image(path, width=width, height=height),
-                        Paragraph(inline_markup(CHART_CAPTIONS.get(key, key)), styles["caption"]),
-                    ]
-                )
-            )
+            block = [
+                Image(path, width=width, height=height),
+                Paragraph(inline_markup(CHART_CAPTIONS.get(key, key)), styles["caption"]),
+            ]
+            story.append(KeepTogether([heading, *block] if not story else block))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not embed chart %s: %s", path, exc)
+    if story:
+        story.append(Spacer(1, 4))
     return story
 
 
@@ -792,6 +839,8 @@ def _sentiment_box(result: Any, styles: dict[str, ParagraphStyle]) -> list[Any]:
     return flowables
 
 
+_CONFIDENCE_BLOCK_RE = re.compile(r"\n\s*(?:\*\*)?confidence", re.IGNORECASE)
+
 _LABEL_RE = re.compile(
     r"^\s*(?:\*\*|__)?\s*(STRONG\s+BUY|STRONG\s+SELL|BUY|SELL|HOLD)\b\s*(?:\*\*|__)?\s*[—–:\-]?\s*",
     re.IGNORECASE,
@@ -815,6 +864,10 @@ def _recommendation_flowables(
     if match:
         label = match.group(1).upper()
         remainder = remainder[match.end() :]
+
+    # The confidence score gets its own block right below this section, so drop it
+    # from the justification text to avoid printing the same rationale twice.
+    remainder = _CONFIDENCE_BLOCK_RE.split(remainder, maxsplit=1)[0].strip()
 
     if label:
         colour = RECOMMENDATION_COLOURS.get(label.upper(), MUTED)
@@ -840,8 +893,6 @@ def _recommendation_flowables(
                 ]
             )
         )
-        proportion = getattr(result, "confidence", None)
-        confidence_note = f"Confidence {proportion}/100" if isinstance(proportion, int) else ""
         right = [
             *(
                 markdown_to_flowables(remainder, styles)
@@ -849,8 +900,6 @@ def _recommendation_flowables(
                 else [Paragraph("No written justification was produced.", styles["body"])]
             ),
         ]
-        if confidence_note:
-            right.append(Paragraph(f"<i>{confidence_note}</i>", styles["small"]))
         wrapper = Table([[badge, right]], colWidths=[34 * mm, PAGE_WIDTH - 2 * MARGIN - 34 * mm])
         wrapper.setStyle(
             TableStyle(
@@ -1018,7 +1067,13 @@ def build_pdf_story(
     styles: dict[str, ParagraphStyle] | None = None,
     include_conversation: bool = True,
 ) -> list[Any]:
-    """Assemble the full flowable story for one analysis."""
+    """Assemble the full flowable story for one analysis.
+
+    The order mirrors the Report Writer contract so the PDF reads like the
+    Markdown report: Executive Summary, Market News Summary, KPI Table and
+    Charts, Sentiment Overview, Analysis and Outlook, Recommendation (with the
+    confidence score), Methodology, Disclaimer.
+    """
     styles = styles or _build_styles()
     report_markdown = getattr(result, "report_markdown", "") or ""
     sections = split_sections(report_markdown)
@@ -1027,6 +1082,7 @@ def build_pdf_story(
     story: list[Any] = []
     story.extend(_cover(result, styles, len(chart_images)))
 
+    # 1 -------------------------------------------------- Executive Summary
     story.extend(
         _section(
             "Executive Summary",
@@ -1035,40 +1091,61 @@ def build_pdf_story(
             fallback="No executive summary was produced for this run.",
         )
     )
-    story.extend(_section("Company Snapshot", find_section(sections, "company_snapshot"), styles))
 
-    news_body = find_section(sections, "news_sentiment")
-    story.append(Paragraph("News &amp; Market Sentiment", styles["h1"]))
-    story.extend(_sentiment_box(result, styles))
+    # 2 ------------------------------------------------ Market News Summary
+    news_body = find_section(sections, "news_summary")
+    story.append(Paragraph("Market News Summary", styles["h1"]))
     if news_body:
         story.extend(markdown_to_flowables(news_body, styles))
+    else:
+        story.append(
+            Paragraph(
+                inline_markup("No news summary was produced; see the headline table below."),
+                styles["body"],
+            )
+        )
     story.extend(_news_flowables(result, styles))
 
+    # 3 ----------------------------------------------- KPI Table and Charts
     story.extend(_kpi_table(result, styles))
-
     charts = _chart_flowables(result, styles)
     if charts:
         story.extend(charts)
-    elif find_section(sections, "charts"):
-        story.extend(_section("Charts", find_section(sections, "charts"), styles))
+    else:
+        chart_text = find_section(sections, "charts")
+        if chart_text:
+            story.extend(_section("Charts", chart_text, styles))
 
-    story.extend(_section("Risk Assessment", find_section(sections, "risk_assessment"), styles))
+    # 4 -------------------------------------------------- Sentiment Overview
+    sentiment_body = find_section(sections, "sentiment")
+    story.append(Paragraph("Sentiment Overview", styles["h1"]))
+    if sentiment_body:
+        story.extend(markdown_to_flowables(sentiment_body, styles))
+    else:
+        story.extend(_sentiment_box(result, styles))
+
+    # 5 ----------------------------------------------- Analysis and Outlook
+    story.extend(_section("Analysis and Outlook", find_section(sections, "outlook"), styles))
+
+    # 6 ------------------------------------------------------ Recommendation
     story.extend(_recommendation_flowables(result, sections, styles))
-
     confidence_section = _confidence_flowables(result, styles)
     if confidence_section:
         story.extend(confidence_section)
     else:
         story.extend(_section("Confidence Score", find_section(sections, "confidence"), styles))
 
-    story.extend(
-        _section("Methodology & Limitations", find_section(sections, "methodology"), styles)
-    )
+    # 7 -------------------------------------------------------- Methodology
+    methodology = find_section(sections, "methodology") or _methodology_text(result)
+    story.extend(_section("Methodology & Limitations", methodology, styles))
 
+    # 8 ---------------------------------------------------------- Disclaimer
     disclaimer = find_section(sections, "disclaimer") or DISCLAIMER_TEXT
     story.append(Paragraph("Disclaimer", styles["h1"]))
     story.append(_callout(inline_markup(disclaimer), styles, colors.HexColor("#C0392B")))
 
+    # Anything the model added beyond the contract (e.g. Company Snapshot,
+    # Risk Assessment) is preserved in an appendix rather than dropped.
     extra_headings = {alias for key in SECTION_ALIASES.values() for alias in key}
     unknown = {
         heading: body
@@ -1085,6 +1162,34 @@ def build_pdf_story(
     if include_conversation:
         story.extend(_conversation_flowables(conversation, styles))
     return story
+
+
+def _methodology_text(result: Any) -> str:
+    """Deterministic methodology note derived from the run's own KPIs."""
+    kpis = getattr(result, "kpis", {}) or {}
+    ticker = getattr(result, "ticker", "the stock")
+    source = kpis.get("source", "yfinance")
+    days = kpis.get("trading_days", "n/a")
+    risk_free = kpis.get("risk_free_rate_pct", 4.0)
+    mode = (
+        "live Gemini agents"
+        if getattr(result, "llm_used", False)
+        else "the deterministic offline crew"
+    )
+    return (
+        f"Data for {ticker} was retrieved from {source} for "
+        f"{getattr(result, 'start', '')} to {getattr(result, 'end', '')} "
+        f"({days} trading days) and analysed by {mode}. KPIs are computed from daily "
+        f"closes: ROI, annualised return, annualised volatility (sqrt(252) scaling), Sharpe "
+        f"ratio with a {risk_free}% risk-free rate, maximum drawdown, Wilder RSI(14), "
+        "SMA 20/50/200 and 20/60-day momentum. Sentiment is scored per headline with a "
+        "finance-tuned lexicon model and aggregated to a -1 to +1 score. Charts are rendered "
+        "with Plotly and rasterised for this document.\n\n"
+        "Limitations: no fundamental filings analysis, no options-implied volatility, no "
+        "intraday data, and news coverage may be incomplete. Sentiment is headline-based and "
+        "backward-looking. This is a systematic, rule-assisted view, not a substitute for "
+        "due diligence."
+    )
 
 
 def generate_pdf_report(

@@ -163,73 +163,104 @@ def research_brief(
     ticker: str,
     company_name: str,
 ) -> str:
-    """Build the Market Researcher's Markdown brief from tool output."""
+    """Build the Market Researcher's Markdown brief from tool output.
+
+    Mirrors the headings the live agent is asked to produce:
+    Key News Items, Sentiment, Key Risks, Catalysts (and Shortcomings when the
+    news flow is thin or synthetic).
+    """
     news = list(news or [])
+    scored = sentiment.get("items") or []
     label = sentiment.get("label", "neutral")
     score = sentiment.get("score", 0.0)
 
-    lines = ["## News Summary"]
+    def _classification(index: int) -> str:
+        """Positive/Neutral/Negative plus a short reason, per the prompt contract."""
+        if index >= len(scored):
+            return "**Neutral** — no sentiment score available for this item"
+        item = scored[index]
+        item_label = str(item.get("label", "neutral")).title()
+        item_score = float(item.get("score", 0.0) or 0.0)
+        reason = (
+            "headline tone is constructive"
+            if item_score > 0.15
+            else "headline tone is negative"
+            if item_score < -0.15
+            else "headline tone is balanced"
+        )
+        return f"**{item_label}** — {reason} (score {item_score:+.2f})"
+
+    lines = ["## Key News Items"]
     if not news:
         lines.append("- No headlines could be retrieved for this window.")
     else:
-        for item in news[:6]:
-            published = f" ({item['published']})" if item.get("published") else ""
-            source = f" — {item['source']}" if item.get("source") else ""
+        for index, item in enumerate(news[:10]):
+            published = item.get("published") or "date n/a"
+            source = item.get("source") or "unknown source"
             demo = " [synthetic]" if item.get("is_demo") else ""
-            lines.append(f"- {item.get('title', '').strip()}{source}{published}{demo}")
+            lines.append(
+                f"- {published} — {item.get('title', '').strip()} — {source}{demo} — "
+                f"{_classification(index)}"
+            )
 
     lines += [
         "",
         "## Sentiment",
         (
-            f"{sentiment_emoji(label)} Aggregate sentiment is **{label}** "
-            f"(score {score:+.2f} on a −1 to +1 scale) across "
-            f"{sentiment.get('articles_analyzed', 0)} headlines: "
-            f"{sentiment.get('positive_count', 0)} positive, "
+            f"{sentiment_emoji(label)} Overall sentiment score: **{score:+.2f}** on a -1 to "
+            f"+1 scale (label: {label}) across {sentiment.get('articles_analyzed', 0)} "
+            f"headlines — {sentiment.get('positive_count', 0)} positive, "
             f"{sentiment.get('neutral_count', 0)} neutral, "
             f"{sentiment.get('negative_count', 0)} negative."
         ),
     ]
     observations = sentiment.get("observations") or []
     if observations:
-        lines.append("")
         lines.extend(f"- {observation}" for observation in observations)
 
-    lines += ["", "## Key Drivers"]
-    drivers = _news_drivers(sentiment, news)
-    lines.extend(f"- {driver}" for driver in drivers) if drivers else lines.append(
-        "- No company-specific drivers identified from available sources."
-    )
+    lines += ["", "## Key Risks"]
+    risks = _news_risks(sentiment, news)
+    lines.extend(f"- {risk}" for risk in risks)
 
-    lines += ["", "## Risks & Gaps"]
-    gaps = [
-        "Headline coverage may miss paywalled or non-English reporting.",
-        "Sentiment is lexicon-based and cannot read sarcasm or nuanced guidance language.",
-    ]
+    lines += ["", "## Catalysts"]
+    catalysts = _news_catalysts(sentiment, news)
+    lines.extend(f"- {catalyst}" for catalyst in catalysts)
+
+    gaps = [_no_news_note(news)]
     if any(item.get("is_demo") for item in news):
-        gaps.insert(0, "SYNTHETIC DEMO DATA: headlines above are simulated, not real news.")
-    if not news:
-        gaps.insert(0, "No news items were available, so sentiment defaults to neutral.")
-    lines.extend(f"- {gap}" for gap in gaps)
+        gaps.insert(0, "Headlines above are SYNTHETIC DEMO DATA, not real news.")
+    gaps.append("Headline coverage may miss paywalled or non-English reporting.")
+    if gaps:
+        lines += ["", "## Shortcomings"]
+        lines.extend(f"- {gap}" for gap in gaps)
     return "\n".join(lines)
 
 
-def _news_drivers(sentiment: dict[str, Any], news: list[dict[str, Any]]) -> list[str]:
-    """Derive short driver statements from scored headlines."""
-    items = sentiment.get("items") or []
-    drivers: list[str] = []
-    positives = [item for item in items if item.get("label") == "positive"]
-    negatives = [item for item in items if item.get("label") == "negative"]
+def _no_news_note(news: list[dict[str, Any]]) -> str:
+    if news:
+        return "Social media / tweet coverage could not be retrieved; news is headline-only."
+    return "No news items were available, so sentiment defaults to neutral."
 
-    for item in positives[:2]:
-        drivers.append(f"[positive] {item['title']}")
-    for item in negatives[:2]:
-        drivers.append(f"[negative] {item['title']}")
-    if not positives and not negatives:
-        drivers.append("[neutral] Headline tone is balanced with no dominant catalyst.")
+
+def _news_risks(sentiment: dict[str, Any], news: list[dict[str, Any]]) -> list[str]:
+    """Derive risk bullets from the most negative classified headlines."""
+    scored = sentiment.get("items") or []
+    negatives = [item for item in scored if item.get("label") == "negative"]
+    risks = [f"Negative coverage: {item['title']}" for item in negatives[:2]]
+    risks.append("Headline-driven sentiment is backward-looking and can reverse quickly.")
     if len(news) < 3:
-        drivers.append("[neutral] Thin news flow limits conviction in the sentiment read.")
-    return drivers
+        risks.append("Thin news flow: low information content limits conviction.")
+    return risks
+
+
+def _news_catalysts(sentiment: dict[str, Any], news: list[dict[str, Any]]) -> list[str]:
+    """Derive catalyst bullets from the most positive classified headlines."""
+    scored = sentiment.get("items") or []
+    positives = [item for item in scored if item.get("label") == "positive"]
+    catalysts = [f"Positive coverage to watch: {item['title']}" for item in positives[:2]]
+    catalysts.append("Next earnings release and any guidance update.")
+    catalysts.append("Analyst rating or price-target revisions.")
+    return catalysts
 
 
 def analyst_brief(kpis: dict[str, Any], ticker: str, company_name: str) -> str:
@@ -334,84 +365,117 @@ def compose_report(
     end: date,
     revision_note: str | None = None,
 ) -> str:
-    """Compose the complete Markdown report without an LLM."""
+    """Compose the complete Markdown report without an LLM.
+
+    The structure matches the Report Writer contract exactly:
+    Executive Summary, Market News Summary, KPI Table and Charts, Sentiment
+    Overview, Analysis and Outlook, Recommendation (with the confidence score)
+    and Disclaimer.
+    """
     from tools.finance_tools import build_kpi_table
 
     verdict = heuristic_recommendation(kpis, sentiment)
     currency = "$" if kpis.get("currency", "USD") == "USD" else f"{kpis.get('currency')} "
     label = sentiment.get("label", "neutral")
+    score = sentiment.get("score", 0.0)
     rows = build_kpi_table(kpis)
 
+    volatility = _as_float(kpis.get("volatility_annual_pct")) or 0.0
+    pe = _as_float(kpis.get("pe_ratio")) or 0.0
+    confidence_label = (
+        "high"
+        if verdict["confidence"] >= 75
+        else "moderate"
+        if verdict["confidence"] >= 55
+        else "low"
+    )
+
     exec_summary = (
-        f"{company_name} ({ticker}) was analysed over {start} → {end}. The shares moved "
-        f"{fmt_pct(kpis.get('period_roi_pct'))} to {fmt_currency(kpis.get('current_price'), symbol=currency)}, "
-        f"{_relative_phrase(kpis)}, while news sentiment is {label} "
-        f"(score {sentiment.get('score', 0.0):+.2f}). Risk is "
-        f"{'high' if (_as_float(kpis.get('volatility_annual_pct')) or 0) > 45 else 'moderate'}, "
-        f"with {fmt_pct(kpis.get('volatility_annual_pct'), signed=False)} annualised volatility and a "
-        f"{fmt_pct(kpis.get('max_drawdown_pct'), signed=False)} maximum drawdown. "
-        f"On this evidence the systematic view is **{verdict['recommendation']}** with "
-        f"{verdict['confidence']}/100 confidence. "
-        + ("⚠️ Figures are synthetic demo data. " if kpis.get("is_demo") else "")
+        f"**Conclusion: {verdict['recommendation']}** with {verdict['confidence']}/100 confidence "
+        f"for {company_name} ({ticker}) over {start} -> {end}. The shares moved "
+        f"{fmt_pct(kpis.get('period_roi_pct'))} to "
+        f"{fmt_currency(kpis.get('current_price'), symbol=currency)}, "
+        f"{_relative_phrase(kpis)}, with {fmt_pct(volatility, signed=False)} annualised volatility "
+        f"and a {fmt_pct(kpis.get('max_drawdown_pct'), signed=False)} maximum drawdown. News "
+        f"sentiment is {label} ({score:+.2f}) across {sentiment.get('articles_analyzed', 0)} "
+        f'headlines, and the trend reads "{kpis.get("ma_trend")}". Valuation stands at '
+        f"{fmt_number(kpis.get('pe_ratio'))}x trailing earnings on a "
+        f"{fmt_compact(kpis.get('market_cap'), symbol=currency)} market cap. "
+        + (
+            "Figures are synthetic demo data and must not inform real decisions."
+            if kpis.get("is_demo")
+            else "The systematic view is detailed in the section below."
+        )
     )
 
-    snapshot = (
-        f"{company_name} trades on {kpis.get('exchange') or 'an unspecified exchange'} in the "
-        f"{kpis.get('sector') or 'unknown'} sector ({kpis.get('industry') or 'n/a'}). "
-        f"Market capitalisation is {fmt_compact(kpis.get('market_cap'), symbol=currency)} and the "
-        f"stock sits at {fmt_number(kpis.get('range_position_pct'), 0)}% of its 52-week range "
-        f"({fmt_currency(kpis.get('low_52w'), symbol=currency)} – "
-        f"{fmt_currency(kpis.get('high_52w'), symbol=currency)}). P/E is "
-        f"{fmt_number(kpis.get('pe_ratio'))}x with EPS of {fmt_currency(kpis.get('eps'), symbol=currency)}."
-    )
-
-    news_block = research_brief(news, sentiment, ticker, company_name)
+    news_body = research_brief(news, sentiment, ticker, company_name)
+    # Reuse the researcher's classified item list under this report's heading.
+    news_items = list(news_body.splitlines())
+    try:
+        items_start = news_items.index("## Key News Items")
+        items_end = news_items.index("## Sentiment")
+        news_block = "\n".join(news_items[items_start + 1 : items_end]).strip()
+    except ValueError:  # pragma: no cover - defensive
+        news_block = "- No classified news items available."
 
     kpi_lines = ["| Metric | Value | Interpretation |", "| --- | --- | --- |"]
     for row in rows:
         kpi_lines.append(f"| {row['metric']} | {row['value']} | {row['note']} |")
 
-    chart_notes = [
-        "- **Price with moving averages** — shows the trend structure; price above SMA50 with a "
-        "rising SMA20 indicates positive momentum.",
-        "- **Trading volume** — unusually high volume around price moves increases the reliability "
-        "of the signal.",
-        "- **RSI (14)** — values above 70 flag overbought conditions, below 30 oversold.",
-        "- **KPI bar chart** — compares return, volatility, drawdown, RSI, P/E, Sharpe and beta on "
-        "one axis for a quick visual risk/return check.",
+    chart_notes = _chart_notes(kpis)
+
+    sentiment_block = (
+        f"{sentiment_emoji(label)} **Sentiment score: {score:+.2f}** on a -1 to +1 scale "
+        f"(label: {label}). Split: {sentiment.get('positive_count', 0)} positive, "
+        f"{sentiment.get('neutral_count', 0)} neutral, {sentiment.get('negative_count', 0)} "
+        f"negative across {sentiment.get('articles_analyzed', 0)} headlines. "
+        f"The tone is driven by {_tone_driver(sentiment)}."
+    )
+    observations = sentiment.get("observations") or []
+    if observations:
+        sentiment_block += "\n\n" + "\n".join(f"- {note}" for note in observations[:3])
+
+    risks = [
+        f"Market risk: {fmt_pct(volatility, signed=False)} annualised volatility, beta "
+        f"{fmt_number(kpis.get('beta'))}.",
+        f"Drawdown risk: worst peak-to-trough decline of "
+        f"{fmt_pct(kpis.get('max_drawdown_pct'), signed=False)} in the window.",
+        f"Valuation risk: trailing P/E of {fmt_number(kpis.get('pe_ratio'))}x "
+        + (
+            "is elevated and vulnerable to earnings disappointment."
+            if pe > 35
+            else "looks broadly reasonable for the sector."
+        ),
+        f"News risk: aggregate sentiment is {label}; a tone shift could pressure the shares.",
+    ]
+    outlook_lines = [
+        "\n".join(f"- {risk}" for risk in risks),
+        "",
+        f"**Strength:** {fmt_pct(kpis.get('period_roi_pct'))} period return, "
+        f"{fmt_pct(kpis.get('momentum_20d_pct'))} 20-day momentum, trend "
+        f'"{kpis.get("ma_trend")}", Sharpe {fmt_number(kpis.get("sharpe_ratio"))}.',
+        f"**Watch items:** RSI {fmt_number(kpis.get('rsi_14'), 1)} "
+        f"({kpis.get('rsi_signal')}), 52-week range position "
+        f"{fmt_number(kpis.get('range_position_pct'), 0)}%, volume trend "
+        f"{fmt_pct(kpis.get('volume_trend_pct'))}.",
+        _contradiction_note(kpis, sentiment, verdict["recommendation"]),
     ]
 
     recommendation_lead = (
         f"the shares returned {fmt_pct(kpis.get('period_roi_pct'))} over the window, "
         f"20-day momentum is {fmt_pct(kpis.get('momentum_20d_pct'))}, the trend reads "
         f'"{kpis.get("ma_trend")}" and news sentiment is {label} '
-        f"({sentiment.get('score', 0.0):+.2f}); together these give a systematic signal "
-        f"score of {verdict['score']:+.2f}."
+        f"({score:+.2f}); together these give a systematic signal score of "
+        f"{verdict['score']:+.2f}."
     )
 
-    risk_lines = [
-        f"- **Market risk:** {fmt_pct(kpis.get('volatility_annual_pct'), signed=False)} annualised "
-        f"volatility and a beta of {fmt_number(kpis.get('beta'))}.",
-        f"- **Drawdown risk:** the worst peak-to-trough decline in the window was "
-        f"{fmt_pct(kpis.get('max_drawdown_pct'), signed=False)}.",
-        f"- **Valuation risk:** trailing P/E of {fmt_number(kpis.get('pe_ratio'))}x "
-        f"{'is elevated and vulnerable to earnings disappointment' if (_as_float(kpis.get('pe_ratio')) or 0) > 35 else 'looks broadly reasonable for the sector'}.",
-        f"- **News risk:** aggregate sentiment is {label}; a shift in tone could pressure the shares.",
-        "- **Data risk:** "
-        + (
-            "this run uses synthetic demo data and must not inform real decisions."
-            if kpis.get("is_demo")
-            else "provider data may be delayed or incomplete; verify against filings."
-        ),
-    ]
-
-    demo_confidence_note = (
-        "- Synthetic demo data caps confidence below 70.\n" if kpis.get("is_demo") else ""
-    )
     demo_banner = (
-        "\n> ⚠️ **SYNTHETIC DEMO DATA** — figures are simulated, not market data.\n"
+        "\n> **SYNTHETIC DEMO DATA** - figures are simulated, not market data.\n"
         if kpis.get("is_demo")
         else ""
+    )
+    demo_confidence_note = (
+        "- Synthetic demo data caps confidence below 65.\n" if kpis.get("is_demo") else ""
     )
 
     report = f"""# {ticker} — Financial Analysis Report
@@ -421,47 +485,32 @@ def compose_report(
 ## Executive Summary
 {exec_summary}
 
-## Company Snapshot
-{snapshot}
+## Market News Summary
+{news_block}
 
-## News & Market Sentiment
-{news_block.replace("## News Summary", "").replace("## Sentiment", "**Sentiment**").replace("## Key Drivers", "**Key drivers**").replace("## Risks & Gaps", "**Risks & gaps**").strip()}
-
-## KPI Table
+## KPI Table and Charts
 {chr(10).join(kpi_lines)}
 
-## Charts
 {chr(10).join(chart_notes)}
 
-## Risk Assessment
-{chr(10).join(risk_lines)}
+## Sentiment Overview
+{sentiment_block}
+
+## Analysis and Outlook
+{chr(10).join(outlook_lines)}
 
 ## Recommendation
 **{verdict["recommendation"]}** — {recommendation_lead}
 
-Position risk to weigh alongside this view: {fmt_pct(kpis.get("volatility_annual_pct"), signed=False)}
-annualised volatility, a {fmt_pct(kpis.get("max_drawdown_pct"), signed=False)} maximum drawdown and a
-Sharpe ratio of {fmt_number(kpis.get("sharpe_ratio"))}. Return versus the benchmark is
-{fmt_pct(kpis.get("relative_return_pct"))}.
+Position risk to weigh alongside this view: {fmt_pct(volatility, signed=False)} annualised
+volatility, a {fmt_pct(kpis.get("max_drawdown_pct"), signed=False)} maximum drawdown and a
+Sharpe ratio of {fmt_number(kpis.get("sharpe_ratio"))}.
 
-## Confidence Score
-**Confidence:** {verdict["confidence"]}/100 ({"moderate" if verdict["confidence"] >= 60 else "low"})
+**Confidence:** {verdict["confidence"]}/100 ({confidence_label})
 
 {verdict["rationale"]}
 {demo_confidence_note}- Missing or short history reduces confidence.
 - Sentiment is headline-based and backward-looking.
-
-## Methodology & Limitations
-Data was retrieved for {ticker} from {kpis.get("source", "yfinance")} for {start} → {end}
-({kpis.get("trading_days", 0)} trading days). KPIs are computed from daily closes:
-ROI, annualised return, annualised volatility (√{252} scaling), Sharpe ratio using a
-{kpis.get("risk_free_rate_pct", 4.0)}% risk-free rate, maximum drawdown, Wilder RSI(14), SMA20/50/200
-and momentum windows. Sentiment is derived from recent headlines using a finance-tuned
-lexicon model. Charts are rendered with Plotly and rasterised for the PDF.
-
-Limitations: no fundamental filings analysis, no options-implied volatility, no
-intraday data, and news coverage may be incomplete. This is a systematic, rule-assisted
-view — not a substitute for due diligence.
 
 ## Disclaimer
 {DISCLAIMER_TEXT}
@@ -470,6 +519,62 @@ view — not a substitute for due diligence.
     if revision_note:
         report += f"\n---\n_Revision note: {revision_note}_\n"
     return report.strip()
+
+
+def _chart_notes(kpis: dict[str, Any]) -> list[str]:
+    """One bullet per chart, mirroring what the PDF embeds."""
+    return [
+        f"- **Price with moving averages** (`{kpis.get('ticker', '')}_price.png`) — SMA20 "
+        f"{fmt_currency(kpis.get('sma_20'))}, SMA50 {fmt_currency(kpis.get('sma_50'))}, "
+        f"SMA200 {fmt_currency(kpis.get('sma_200'))}; price above the SMA50 signals a "
+        f"constructive trend.",
+        "- **Volume** (`*_volume.png`) — bars coloured by up/down days; volume spikes around "
+        "price moves raise the reliability of the signal.",
+        "- **RSI (14)** (`*_rsi.png`) — above 70 is overbought, below 30 oversold; current "
+        f"reading {fmt_number(kpis.get('rsi_14'), 1)} ({kpis.get('rsi_signal')}).",
+        "- **KPI comparison** (`*_kpi.png`) — return, volatility, drawdown, RSI, P/E, Sharpe "
+        "and beta on one axis for a quick risk/return read.",
+    ]
+
+
+def _tone_driver(sentiment: dict[str, Any]) -> str:
+    counted = {
+        "positive": int(sentiment.get("positive_count", 0) or 0),
+        "negative": int(sentiment.get("negative_count", 0) or 0),
+        "neutral": int(sentiment.get("neutral_count", 0) or 0),
+    }
+    dominant = max(counted, key=lambda key: counted[key]) if counted else "neutral"
+    if (
+        counted["positive"]
+        and counted["negative"]
+        and abs(counted["positive"] - counted["negative"]) <= 2
+    ):
+        return "a genuinely mixed set of headlines, with positive and negative items balancing"
+    return f"predominantly {dominant} headlines"
+
+
+def _contradiction_note(
+    kpis: dict[str, Any], sentiment: dict[str, Any], recommendation: str
+) -> str:
+    """Call out a sentiment/price disagreement, as the Writer prompt requires."""
+    score = _as_float(sentiment.get("score")) or 0.0
+    momentum = _as_float(kpis.get("momentum_20d_pct")) or 0.0
+    if score <= -0.25 and momentum >= 5:
+        return (
+            "**Divergence:** price momentum is positive while news tone is negative — "
+            "treat the rally as fragile until sentiment improves."
+        )
+    if score >= 0.25 and momentum <= -5:
+        return (
+            "**Divergence:** headlines are positive but price momentum is negative — "
+            "the market is not yet pricing the good news."
+        )
+    if recommendation in {"BUY", "STRONG BUY"} and score < 0:
+        return (
+            "**Divergence to monitor:** the quantitative signal is constructive while news "
+            "sentiment is negative; sentiment is the swing factor."
+        )
+    return "**Consistency:** news tone and price trend point in the same direction."
 
 
 def _relative_phrase(kpis: dict[str, Any]) -> str:
