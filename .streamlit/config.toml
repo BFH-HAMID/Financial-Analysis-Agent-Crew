@@ -11,6 +11,8 @@ font = "sans serif"
 address = "0.0.0.0"
 port = 8501
 headless = true
+# Proxied deployments (Docker, Cloud, hosted previews) terminate TLS at the edge,
+# so cross-origin WebSocket checks must stay relaxed or the app cannot connect.
 enableCORS = false
 enableXsrfProtection = true
 fileWatcherType = "auto"
