@@ -1,0 +1,20 @@
+services:
+  financial-crew:
+    build: .
+    image: financial-crew:latest
+    container_name: financial-crew
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    volumes:
+      # Persist generated PDFs, charts and logs on the host.
+      - ./reports/output:/app/reports/output
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s

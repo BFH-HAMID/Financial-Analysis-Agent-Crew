@@ -1,0 +1,26 @@
+# Ruff configuration (lint + format)
+line-length = 100
+target-version = "py310"
+
+exclude = [
+    ".venv",
+    "reports/output",
+    "logs",
+]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM"]
+ignore = [
+    "E501",   # line length is handled by the formatter
+    "B008",   # function calls in argument defaults (typer/streamlit style)
+    "SIM108", # ternaries are not always clearer
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["E402", "B011"]
+"app.py" = ["E402"]   # imports follow the secrets bootstrap by necessity
+"conftest.py" = ["E402"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

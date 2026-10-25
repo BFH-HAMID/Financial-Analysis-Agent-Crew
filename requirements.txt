@@ -1,0 +1,33 @@
+# ---------------------------------------------------------------------------
+# Financial Analysis Agent Crew — runtime dependencies
+# Python 3.10+ (developed and tested on 3.11)
+# ---------------------------------------------------------------------------
+
+# Agent framework + LLM provider
+agno>=3.1.0,<4.0.0
+google-genai>=1.0.0
+google-auth>=2.30.0
+
+# Market data
+yfinance>=1.7.0
+pandas>=2.2.0
+numpy>=1.26.0
+
+# UI + charts
+streamlit>=1.49.0
+plotly>=5.24.0
+matplotlib>=3.8.0
+# Optional: pixel-perfect Plotly -> PNG export for the PDF. Requires a Chrome
+# build (`plotly_get_chrome`). Without it, charts fall back to matplotlib.
+# kaleido>=1.0.0
+
+# News + sentiment
+ddgs>=9.0.0
+requests>=2.32.0
+vaderSentiment>=3.3.2
+
+# Reporting
+reportlab>=4.2.0
+
+# Configuration
+python-dotenv>=1.0.0
