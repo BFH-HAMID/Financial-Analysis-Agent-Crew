@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "arena/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    env:
+      # The suite must pass with no secrets and no network calls to Gemini.
+      FORCE_DEMO_DATA: "1"
+      ALLOW_DEMO_DATA: "1"
+      LOG_LEVEL: "WARNING"
+      AGNO_TELEMETRY: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check . --output-format=github
+        continue-on-error: true
+
+      - name: Run tests
+        run: python -m pytest tests -q --cov=. --cov-report=term-missing --cov-fail-under=55
+
+      - name: Verify README assets regenerate
+        run: FORCE_DEMO_DATA=1 python scripts/make_assets.py --skip-gif
+
+      - name: Smoke test the CLI
+        run: python scripts/daily_report.py --tickers AAPL --days 90 --no-llm --no-pdf
+
+      - name: Upload generated reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.python-version }}
+          path: |
+            reports/output/*.md
+            reports/output/*.json
+            reports/output/pdfs/*.pdf
+          if-no-files-found: ignore
+          retention-days: 7
